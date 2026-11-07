@@ -23,16 +23,15 @@ concurrency:
 
 jobs:
   build:
-    name: Extract and Build Camera APK
+    name: Build Camera Android APK
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
     steps:
-      # 1. Download repository files
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 2. Check both ZIP files
+      # Check both ZIP files
       - name: Verify Project ZIP Parts
         shell: bash
         run: |
@@ -42,16 +41,14 @@ jobs:
           PART2="$GITHUB_WORKSPACE/Camera-Pro-Camera-Elite-Part-2.zip"
 
           if [ ! -f "$PART1" ]; then
-            echo "::error::Part 1 ZIP not found!"
+            echo "::error::Part 1 ZIP not found."
             exit 1
           fi
 
           if [ ! -f "$PART2" ]; then
-            echo "::error::Part 2 ZIP not found!"
+            echo "::error::Part 2 ZIP not found."
             exit 1
           fi
-
-          echo "Both ZIP files found."
 
           echo "Checking Part 1..."
           unzip -tq "$PART1"
@@ -59,37 +56,27 @@ jobs:
           echo "Checking Part 2..."
           unzip -tq "$PART2"
 
-          echo "Both ZIP files passed integrity checks."
+          echo "Both ZIP files are valid."
 
-      # 3. Extract both ZIPs into the same directory
-      - name: Extract Both Project Parts
+      # Extract both parts into the same directory
+      - name: Extract Both ZIP Parts
         shell: bash
         run: |
           set -euo pipefail
 
           EXTRACT_DIR="$RUNNER_TEMP/camera-project"
-
           mkdir -p "$EXTRACT_DIR"
 
-          echo "Extracting Part 1..."
           unzip -oq \
             "$GITHUB_WORKSPACE/Camera-Pro-Camera-Elite-Part-1.zip" \
             -d "$EXTRACT_DIR"
 
-          echo "Extracting Part 2..."
           unzip -oq \
             "$GITHUB_WORKSPACE/Camera-Pro-Camera-Elite-Part-2.zip" \
             -d "$EXTRACT_DIR"
 
           PROJECT_DIR="$EXTRACT_DIR/ProCameraElite"
 
-          if [ ! -d "$PROJECT_DIR" ]; then
-            echo "::error::ProCameraElite project folder not found."
-            find "$EXTRACT_DIR" -maxdepth 3 -type f | head -100
-            exit 1
-          fi
-
-          # Verify essential Android project files
           REQUIRED_FILES=(
             "settings.gradle.kts"
             "build.gradle.kts"
@@ -103,7 +90,7 @@ jobs:
 
           for FILE in "${REQUIRED_FILES[@]}"; do
             if [ ! -f "$PROJECT_DIR/$FILE" ]; then
-              echo "::error::Missing required file: $FILE"
+              echo "::error::Missing project file: $FILE"
               exit 1
             fi
           done
@@ -112,37 +99,39 @@ jobs:
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Project extraction completed successfully."
+          echo "Project extracted successfully."
 
-      # 4. Configure Java 17
-      # Gradle cache is intentionally disabled to avoid the previous error.
+      # Java 17
       - name: Set Up Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      # 5. Configure Android SDK
+      # IMPORTANT:
+      # Do not install the obsolete Android SDK "tools" package.
       - name: Set Up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platform-tools
+          accept-android-sdk-licenses: true
 
-      # 6. Install required Android SDK components
+      # Install required SDK platform and build tools
       - name: Install Android SDK Components
         shell: bash
         run: |
           set -euo pipefail
 
-          yes | sdkmanager --licenses >/dev/null || true
-
           sdkmanager \
-            "platform-tools" \
             "platforms;android-35" \
-            "build-tools;35.0.0"
+            "build-tools;35.0.0" \
+            "platform-tools"
 
-          echo "Android SDK setup completed."
+          echo "Android SDK components installed."
 
-      # 7. Verify Java and Gradle
-      - name: Verify Build Environment
+      # Verify environment
+      - name: Verify Java and Gradle
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
@@ -151,8 +140,8 @@ jobs:
           java -version
           ./gradlew --version
 
-      # 8. Build Debug and Release APK
-      - name: Build Camera APK
+      # Build both APK variants
+      - name: Build Debug and Release APK
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
@@ -165,58 +154,50 @@ jobs:
             assembleDebug \
             assembleRelease
 
-      # 9. Verify generated APK files
-      - name: Verify APK Files
+      # Collect APKs
+      - name: Verify and Collect APK Files
         shell: bash
         run: |
           set -euo pipefail
 
           APK_DIR="$PROJECT_DIR/app/build/outputs/apk"
+          OUTPUT_DIR="$RUNNER_TEMP/camera-apk-output"
 
-          if [ ! -d "$APK_DIR" ]; then
-            echo "::error::APK output directory not found."
-            exit 1
-          fi
-
-          echo "Generated APK files:"
-
-          find "$APK_DIR" -type f -name "*.apk" -print
+          mkdir -p "$OUTPUT_DIR"
 
           DEBUG_APK="$APK_DIR/debug/app-debug.apk"
-          RELEASE_APK="$APK_DIR/release/app-release-unsigned.apk"
 
           if [ ! -f "$DEBUG_APK" ]; then
             echo "::error::Debug APK was not generated."
             exit 1
           fi
 
-          if [ ! -f "$RELEASE_APK" ]; then
+          RELEASE_APK="$(find "$APK_DIR/release" \
+            -maxdepth 1 -type f -name "*.apk" | head -n 1)"
+
+          if [ -z "$RELEASE_APK" ]; then
             echo "::error::Release APK was not generated."
             exit 1
           fi
 
-          mkdir -p "$RUNNER_TEMP/camera-apk-output"
+          cp "$DEBUG_APK" "$OUTPUT_DIR/Camera-debug.apk"
+          cp "$RELEASE_APK" "$OUTPUT_DIR/Camera-release.apk"
 
-          cp "$DEBUG_APK" \
-            "$RUNNER_TEMP/camera-apk-output/Camera-debug.apk"
-
-          cp "$RELEASE_APK" \
-            "$RUNNER_TEMP/camera-apk-output/Camera-release-unsigned.apk"
-
-          cd "$RUNNER_TEMP/camera-apk-output"
+          cd "$OUTPUT_DIR"
 
           sha256sum *.apk > SHA256SUMS.txt
 
-          echo "Both APK files verified."
+          echo "APK files collected successfully."
+          ls -lh
 
-      # 10. Upload APKs to GitHub Actions
+      # Upload APK artifacts
       - name: Upload Camera APKs
         uses: actions/upload-artifact@v4
         with:
           name: Camera-APK-Build
           path: |
             ${{ runner.temp }}/camera-apk-output/Camera-debug.apk
-            ${{ runner.temp }}/camera-apk-output/Camera-release-unsigned.apk
+            ${{ runner.temp }}/camera-apk-output/Camera-release.apk
             ${{ runner.temp }}/camera-apk-output/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
