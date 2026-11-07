@@ -1,3 +1,4 @@
+
 name: Camera APK Build
 
 on:
@@ -5,10 +6,12 @@ on:
     branches:
       - main
       - master
+
   pull_request:
     branches:
       - main
       - master
+
   workflow_dispatch:
 
 permissions:
@@ -20,15 +23,17 @@ concurrency:
 
 jobs:
   build:
-    name: Extract project parts and build APK
+    name: Extract and Build Camera APK
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
-      - name: Checkout repository
+      # 1. Download repository files
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Check both project ZIP parts
+      # 2. Check both ZIP files
+      - name: Verify Project ZIP Parts
         shell: bash
         run: |
           set -euo pipefail
@@ -36,98 +41,182 @@ jobs:
           PART1="$GITHUB_WORKSPACE/Camera-Pro-Camera-Elite-Part-1.zip"
           PART2="$GITHUB_WORKSPACE/Camera-Pro-Camera-Elite-Part-2.zip"
 
-          test -f "$PART1" || {
-            echo "::error::Missing Camera-Pro-Camera-Elite-Part-1.zip in repository root."
+          if [ ! -f "$PART1" ]; then
+            echo "::error::Part 1 ZIP not found!"
             exit 1
-          }
-          test -f "$PART2" || {
-            echo "::error::Missing Camera-Pro-Camera-Elite-Part-2.zip in repository root."
+          fi
+
+          if [ ! -f "$PART2" ]; then
+            echo "::error::Part 2 ZIP not found!"
             exit 1
-          }
+          fi
 
-          echo "Part 1 size: $(du -h "$PART1" | cut -f1)"
-          echo "Part 2 size: $(du -h "$PART2" | cut -f1)"
+          echo "Both ZIP files found."
 
+          echo "Checking Part 1..."
           unzip -tq "$PART1"
+
+          echo "Checking Part 2..."
           unzip -tq "$PART2"
 
-      - name: Extract both ZIP parts into one project folder
+          echo "Both ZIP files passed integrity checks."
+
+      # 3. Extract both ZIPs into the same directory
+      - name: Extract Both Project Parts
         shell: bash
         run: |
           set -euo pipefail
 
           EXTRACT_DIR="$RUNNER_TEMP/camera-project"
+
           mkdir -p "$EXTRACT_DIR"
 
-          # Extract both archives into the same destination.
-          unzip -oq "$GITHUB_WORKSPACE/Camera-Pro-Camera-Elite-Part-1.zip" -d "$EXTRACT_DIR"
-          unzip -oq "$GITHUB_WORKSPACE/Camera-Pro-Camera-Elite-Part-2.zip" -d "$EXTRACT_DIR"
+          echo "Extracting Part 1..."
+          unzip -oq \
+            "$GITHUB_WORKSPACE/Camera-Pro-Camera-Elite-Part-1.zip" \
+            -d "$EXTRACT_DIR"
+
+          echo "Extracting Part 2..."
+          unzip -oq \
+            "$GITHUB_WORKSPACE/Camera-Pro-Camera-Elite-Part-2.zip" \
+            -d "$EXTRACT_DIR"
 
           PROJECT_DIR="$EXTRACT_DIR/ProCameraElite"
 
-          test -f "$PROJECT_DIR/settings.gradle.kts"
-          test -f "$PROJECT_DIR/build.gradle.kts"
-          test -f "$PROJECT_DIR/app/build.gradle.kts"
-          test -f "$PROJECT_DIR/gradlew"
-          test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+          if [ ! -d "$PROJECT_DIR" ]; then
+            echo "::error::ProCameraElite project folder not found."
+            find "$EXTRACT_DIR" -maxdepth 3 -type f | head -100
+            exit 1
+          fi
+
+          # Verify essential Android project files
+          REQUIRED_FILES=(
+            "settings.gradle.kts"
+            "build.gradle.kts"
+            "gradle.properties"
+            "gradlew"
+            "gradle/wrapper/gradle-wrapper.jar"
+            "gradle/wrapper/gradle-wrapper.properties"
+            "app/build.gradle.kts"
+            "app/src/main/AndroidManifest.xml"
+          )
+
+          for FILE in "${REQUIRED_FILES[@]}"; do
+            if [ ! -f "$PROJECT_DIR/$FILE" ]; then
+              echo "::error::Missing required file: $FILE"
+              exit 1
+            fi
+          done
 
           chmod +x "$PROJECT_DIR/gradlew"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      - name: Set up JDK 17
+          echo "Project extraction completed successfully."
+
+      # 4. Configure Java 17
+      # Gradle cache is intentionally disabled to avoid the previous error.
+      - name: Set Up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-          cache: gradle
 
-      - name: Set up Android SDK
+      # 5. Configure Android SDK
+      - name: Set Up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Accept Android SDK licenses
+      # 6. Install required Android SDK components
+      - name: Install Android SDK Components
         shell: bash
-        run: yes | sdkmanager --licenses > /dev/null || true
-
-      - name: Show build environment
-        working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          java -version
-          ./gradlew --version
+          set -euo pipefail
 
-      - name: Build debug and release APKs
+          yes | sdkmanager --licenses >/dev/null || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+          echo "Android SDK setup completed."
+
+      # 7. Verify Java and Gradle
+      - name: Verify Build Environment
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
-          ./gradlew --no-daemon --stacktrace clean assembleDebug assembleRelease
 
-      - name: Verify APK outputs and generate checksums
+          java -version
+          ./gradlew --version
+
+      # 8. Build Debug and Release APK
+      - name: Build Camera APK
         working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew \
+            --no-daemon \
+            --stacktrace \
+            clean \
+            assembleDebug \
+            assembleRelease
+
+      # 9. Verify generated APK files
+      - name: Verify APK Files
         shell: bash
         run: |
           set -euo pipefail
 
           APK_DIR="$PROJECT_DIR/app/build/outputs/apk"
-          test -d "$APK_DIR"
+
+          if [ ! -d "$APK_DIR" ]; then
+            echo "::error::APK output directory not found."
+            exit 1
+          fi
+
+          echo "Generated APK files:"
 
           find "$APK_DIR" -type f -name "*.apk" -print
-          APK_COUNT="$(find "$APK_DIR" -type f -name "*.apk" | wc -l)"
-          test "$APK_COUNT" -ge 2 || {
-            echo "::error::Expected debug and release APK files, but found $APK_COUNT."
+
+          DEBUG_APK="$APK_DIR/debug/app-debug.apk"
+          RELEASE_APK="$APK_DIR/release/app-release-unsigned.apk"
+
+          if [ ! -f "$DEBUG_APK" ]; then
+            echo "::error::Debug APK was not generated."
             exit 1
-          }
+          fi
 
-          find "$APK_DIR" -type f -name "*.apk" -print0 \
-            | sort -z \
-            | xargs -0 sha256sum > "$PROJECT_DIR/SHA256SUMS.txt"
+          if [ ! -f "$RELEASE_APK" ]; then
+            echo "::error::Release APK was not generated."
+            exit 1
+          fi
 
-      - name: Upload APKs and checksums
+          mkdir -p "$RUNNER_TEMP/camera-apk-output"
+
+          cp "$DEBUG_APK" \
+            "$RUNNER_TEMP/camera-apk-output/Camera-debug.apk"
+
+          cp "$RELEASE_APK" \
+            "$RUNNER_TEMP/camera-apk-output/Camera-release-unsigned.apk"
+
+          cd "$RUNNER_TEMP/camera-apk-output"
+
+          sha256sum *.apk > SHA256SUMS.txt
+
+          echo "Both APK files verified."
+
+      # 10. Upload APKs to GitHub Actions
+      - name: Upload Camera APKs
         uses: actions/upload-artifact@v4
         with:
           name: Camera-APK-Build
           path: |
-            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/**/*.apk
-            ${{ env.PROJECT_DIR }}/SHA256SUMS.txt
+            ${{ runner.temp }}/camera-apk-output/Camera-debug.apk
+            ${{ runner.temp }}/camera-apk-output/Camera-release-unsigned.apk
+            ${{ runner.temp }}/camera-apk-output/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
