@@ -1,3 +1,4 @@
+
 name: Build Camera Pro Elite APK
 
 on:
@@ -10,27 +11,35 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: camera-pro-elite-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build Android APK
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Verify ZIP Files
+      - name: Verify Camera ZIP Files
         shell: bash
         run: |
           set -euo pipefail
 
-          test -f "Camera-Pro-Camera-Elite-Part-1.zip"
-          test -f "Camera-Pro-Camera-Elite-Part-2-v1.1.zip"
+          PART_1="Camera-Pro-Camera-Elite-Part-1.zip"
+          PART_2="Camera-Pro-Camera-Elite-Part-2-v1.1.zip"
 
-          unzip -t "Camera-Pro-Camera-Elite-Part-1.zip"
-          unzip -t "Camera-Pro-Camera-Elite-Part-2-v1.1.zip"
+          test -f "$PART_1" || { echo "Missing file: $PART_1"; exit 1; }
+          test -f "$PART_2" || { echo "Missing file: $PART_2"; exit 1; }
 
-          echo "Both ZIP files verified successfully."
+          unzip -tq "$PART_1"
+          unzip -tq "$PART_2"
+
+          echo "Both Camera project ZIP files passed integrity checks."
 
       - name: Set Up Java 17
         uses: actions/setup-java@v4
@@ -39,41 +48,43 @@ jobs:
           java-version: "17"
 
       - name: Set Up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
         with:
           accept-android-sdk-licenses: true
+          packages: "platform-tools"
 
-      - name: Install Android SDK Packages
+      - name: Install Required Android SDK Packages
         shell: bash
         run: |
           set -euo pipefail
 
-          sdkmanager --install "platform-tools"
-          sdkmanager --install "platforms;android-35"
-          sdkmanager --install "build-tools;35.0.0"
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+          sdkmanager --list_installed
 
-          echo "Android SDK packages installed."
+          echo "Required Android SDK packages are installed."
 
       - name: Extract Camera Project ZIP Parts
         shell: bash
         run: |
           set -euo pipefail
 
-          PROJECT_DIR="$RUNNER_TEMP/camera-project"
-          mkdir -p "$PROJECT_DIR"
+          EXTRACT_DIR="$RUNNER_TEMP/camera-project"
+          mkdir -p "$EXTRACT_DIR"
 
-          unzip -q "Camera-Pro-Camera-Elite-Part-1.zip" -d "$PROJECT_DIR"
-          unzip -q "Camera-Pro-Camera-Elite-Part-2-v1.1.zip" -d "$PROJECT_DIR"
+          unzip -oq "Camera-Pro-Camera-Elite-Part-1.zip" -d "$EXTRACT_DIR"
+          unzip -oq "Camera-Pro-Camera-Elite-Part-2-v1.1.zip" -d "$EXTRACT_DIR"
 
-          echo "PROJECT_DIR=$PROJECT_DIR/ProCameraElite" >> "$GITHUB_ENV"
+          PROJECT_DIR="$EXTRACT_DIR/ProCameraElite"
 
-          test -f "$PROJECT_DIR/ProCameraElite/settings.gradle.kts"
-          test -f "$PROJECT_DIR/ProCameraElite/gradlew"
-          test -f "$PROJECT_DIR/ProCameraElite/app/build.gradle.kts"
+          test -d "$PROJECT_DIR" || { echo "Project folder not found: $PROJECT_DIR"; exit 1; }
+          test -f "$PROJECT_DIR/settings.gradle.kts" || { echo "settings.gradle.kts not found"; exit 1; }
+          test -f "$PROJECT_DIR/gradlew" || { echo "Gradle wrapper not found"; exit 1; }
+          test -f "$PROJECT_DIR/app/build.gradle.kts" || { echo "app/build.gradle.kts not found"; exit 1; }
 
-          echo "Camera project extracted successfully."
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Camera project extracted and required files verified."
 
-      - name: Make Gradle Executable
+      - name: Make Gradle Wrapper Executable
         shell: bash
         run: |
           set -euo pipefail
@@ -84,32 +95,42 @@ jobs:
         working-directory: ${{ runner.temp }}/camera-project/ProCameraElite
         run: |
           set -euo pipefail
-          ./gradlew --no-daemon clean assembleDebug
+          ./gradlew --no-daemon --stacktrace clean assembleDebug
+
+          find app/build/outputs/apk -type f -name "*.apk" -print
+          test -n "$(find app/build/outputs/apk -type f -path "*/debug/*" -name "*.apk" -print -quit)" \
+            || { echo "Debug APK was not generated."; exit 1; }
 
       - name: Build Release APK
         shell: bash
         working-directory: ${{ runner.temp }}/camera-project/ProCameraElite
         run: |
           set -euo pipefail
-          ./gradlew --no-daemon assembleRelease
+          ./gradlew --no-daemon --stacktrace assembleRelease
 
       - name: Collect APK Files
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p "$RUNNER_TEMP/apk-output"
+          OUTPUT_DIR="$RUNNER_TEMP/camera-apk-output"
+          PROJECT_DIR="${PROJECT_DIR:-$RUNNER_TEMP/camera-project/ProCameraElite}"
+          mkdir -p "$OUTPUT_DIR"
 
-          find "$PROJECT_DIR/app/build/outputs/apk" \
-            -type f -name "*.apk" \
-            -exec cp {} "$RUNNER_TEMP/apk-output/" \;
+          if [ -d "$PROJECT_DIR/app/build/outputs/apk" ]; then
+            find "$PROJECT_DIR/app/build/outputs/apk" -type f -name "*.apk" \
+              -exec cp -f {} "$OUTPUT_DIR/" \;
+          fi
 
-          test -n "$(find "$RUNNER_TEMP/apk-output" -name "*.apk" -print -quit)"
+          echo "APK files collected (if any were generated):"
+          ls -lh "$OUTPUT_DIR" || true
 
       - name: Upload APK Artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: Camera-Pro-Camera-Elite-APKs
-          path: ${{ runner.temp }}/apk-output/*.apk
-          if-no-files-found: error
+          path: ${{ runner.temp }}/camera-apk-output/*.apk
+          if-no-files-found: warn
           retention-days: 14
